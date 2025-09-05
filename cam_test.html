@@ -1,0 +1,18 @@
+<!doctype html>
+<html>
+  <body style="margin:0;background:#111;color:#eee;font-family:sans-serif">
+    <div style="padding:10px">Camera test</div>
+    <video id="v" playsinline autoplay style="width:100vw;height:auto;background:#000"></video>
+    <script>
+      (async () => {
+        try {
+          const s = await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'},audio:false});
+          v.srcObject = s;
+        } catch (e) {
+          alert('Camera error: ' + e.message);
+          console.error(e);
+        }
+      })();
+    </script>
+  </body>
+</html>
