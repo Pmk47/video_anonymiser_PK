@@ -1,197 +1,242 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1" />
+<title>Real-time Eye Anonymiser</title>
+<style>
+  body { margin:0; font-family:system-ui, sans-serif; background:#0b0f14; color:#eaf2ff; }
+  header { padding:12px 16px; font-weight:600; }
+  main { display:flex; flex-direction:column; gap:12px; padding:0 12px 16px; }
+  .video-wrap { position:relative; width:100%; max-width:720px; margin:0 auto; }
+  video, canvas { width:100%; border-radius:12px; background:#000; }
+  #overlay { position:absolute; inset:0; pointer-events:none; }
+  .controls { display:flex; gap:10px; align-items:center; justify-content:center; flex-wrap:wrap; }
+  button { padding:10px 14px; border-radius:10px; border:1px solid #2a3a4d; background:#142132; color:#eaf2ff; font-weight:600; }
+  button:disabled { opacity:.5; }
+  label { color:#9bb0c9; font-size:14px; margin:0 4px; }
+  select, input[type=number] { padding:6px; border-radius:6px; border:1px solid #2a3a4d; background:#0f1722; color:#eaf2ff; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; justify-content:center; align-items:center; }
+  .hint { color:#9bb0c9; font-size:13px; text-align:center; flex-basis:100%; }
+  .timer { font-weight:700; color:#6ec1ff; }
+</style>
+</head>
+<body>
+<header>👁️‍🗨️ Eye Anonymiser — Black Box / Blur</header>
+<main>
+  <div class="video-wrap">
+    <video id="raw" playsinline muted style="display:none"></video>
+    <canvas id="out"></canvas>
+    <canvas id="overlay" style="display:none;"></canvas>
+  </div>
+
+  <div class="controls">
+    <div class="row">
+      <label>Mode:</label>
+      <select id="mode">
+        <option value="black" selected>Black Box</option>
+        <option value="blur">Blur</option>
+      </select>
+      <label>Resolution:</label>
+      <select id="resolution">
+        <option value="1920x1080">1080p</option>
+        <option value="1280x720" selected>720p</option>
+      </select>
+      <label>FPS:</label>
+      <select id="fps">
+        <option value="30" selected>30</option>
+        <option value="24">24</option>
+      </select>
+      <label>Duration(s):</label>
+      <input id="duration" type="number" value="120" min="10" max="600"/>
+    </div>
+    <div class="row">
+      <button id="startBtn">Start</button>
+      <button id="stopBtn" disabled>Stop</button>
+      <label><input id="showOverlay" type="checkbox"> Debug overlay</label>
+    </div>
+    <div class="row">
+      <span class="hint">Anonymisation is done in-browser, nothing uploaded.</span>
+      <span class="timer" id="timer">00:00</span>
+    </div>
+  </div>
+</main>
+
+<!-- TFJS + Backends + FaceMesh -->
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-core@4.20.0/dist/tf-core.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgl@4.20.0/dist/tf-backend-webgl.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-wasm@4.20.0/dist/tf-backend-wasm.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-converter@4.20.0/dist/tf-converter.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/face-landmarks-detection@2.0.1/dist/face-landmarks-detection.min.js"></script>
 
 <script>
 (async () => {
-  const q = s => document.querySelector(s);
+  const $ = s => document.querySelector(s);
   const els = {
-    raw: q('#raw'), out: q('#out'), overlay: q('#overlay'),
-    start: q('#startBtn'), stop: q('#stopBtn'),
-    mode: q('#mode'), res: q('#resolution'), fps: q('#fps'),
-    dur: q('#duration'), show: q('#showOverlay'), timer: q('#timer')
+    raw: $('#raw'), out: $('#out'), overlay: $('#overlay'),
+    start: $('#startBtn'), stop: $('#stopBtn'),
+    mode: $('#mode'), res: $('#resolution'), fps: $('#fps'),
+    dur: $('#duration'), show: $('#showOverlay'), timer: $('#timer')
   };
 
-  // Add a small status line under the timer
+  // Status line
   const status = document.createElement('div');
-  status.style.textAlign = 'center';
-  status.style.fontSize = '13px';
-  status.style.color = '#9bb0c9';
-  status.textContent = 'Loading model…';
-  els.out.closest('main').appendChild(status);
+  status.style.textAlign='center'; status.style.fontSize='13px';
+  status.style.color='#9bb0c9'; status.style.padding='6px 0';
+  status.textContent='Initialising…';
+  document.body.appendChild(status);
+  const say = (t)=>{ status.textContent = t; console.log('[app]', t); };
 
-  const log = (msg) => { status.textContent = msg; console.log('[APP]', msg); };
-
-  // Load model safely
+  // Backend
   try {
-    await tf.setBackend('webgl');
     await tf.ready();
+    let ok = false;
+    try { await tf.setBackend('webgl'); ok = (tf.getBackend()==='webgl'); } catch {}
+    if (!ok) { await tf.setBackend('wasm'); }
+    await tf.ready();
+    say(`Backend: ${tf.getBackend()}`);
   } catch (e) {
-    log('WebGL not available. Try a different browser/device.');
     console.error(e);
+    say('TensorFlow backend init failed.');
   }
 
-  let model;
+  // Model
+  let model = null;
   try {
     model = await faceLandmarksDetection.load(
       faceLandmarksDetection.SupportedPackages.mediapipeFacemesh,
-      { maxFaces: 1 }
+      { maxFaces: 1, shouldLoadIrisModel: false }
     );
-    log('Model loaded. Ready.');
+    say(`Model loaded (${tf.getBackend()}).`);
   } catch (e) {
-    log('Failed to load FaceMesh model.');
-    console.error(e);
-    return;
+    console.warn('Model load failed, preview-only mode.', e);
+    say('Model failed to load — preview-only.');
   }
 
-  const LEFT = [33,7,163,144,145,153,154,155,133,173,157,158,159,160,161,246];
-  const RIGHT= [263,249,390,373,374,380,381,382,362,398,384,385,386,387,388,466];
+  const LEFT=[33,7,163,144,145,153,154,155,133,173,157,158,159,160,161,246];
+  const RIGHT=[263,249,390,373,374,380,381,382,362,398,384,385,386,387,388,466];
 
   let stream=null, rec=null, chunks=[], raf=null, startTime=0, stopId=null;
-  const off = document.createElement('canvas'); const offCtx = off.getContext('2d');
+  const off=document.createElement('canvas'), offCtx=off.getContext('2d');
 
-  function eyeBox(pts, padX=10, padY=8) {
-    if (!pts || !pts.length) return [0,0,0,0];
-    const xs = pts.map(p=>p.x), ys = pts.map(p=>p.y);
+  function eyeBox(pts, padX=10, padY=8){
+    if (!pts?.length) return [0,0,0,0];
+    const xs=pts.map(p=>p.x), ys=pts.map(p=>p.y);
     const minX=Math.min(...xs)-padX, minY=Math.min(...ys)-padY;
     const maxX=Math.max(...xs)+padX, maxY=Math.max(...ys)+padY;
-    return [minX, minY, maxX-minX, maxY-minY];
+    return [minX,minY,maxX-minX,maxY-minY];
   }
-  function drawMask(ctx, mode, pts) {
-    const [x,y,w,h] = eyeBox(pts);
-    if (w<=0 || h<=0) return;
-    if (mode==='black'){
-      ctx.fillStyle='#000'; ctx.fillRect(x,y,w,h);
-    } else {
-      off.width=w; off.height=h;
-      offCtx.clearRect(0,0,w,h);
-      offCtx.drawImage(ctx.canvas, x,y,w,h, 0,0,w,h);
-      ctx.save(); ctx.filter='blur(12px)';
-      ctx.drawImage(off, x,y,w,h,h);
-      ctx.restore();
+  function drawMask(ctx, mode, pts){
+    const [x,y,w,h]=eyeBox(pts);
+    if (w<=0||h<=0) return;
+    if (mode==='black'){ ctx.fillStyle='#000'; ctx.fillRect(x,y,w,h); }
+    else {
+      off.width=w; off.height=h; offCtx.clearRect(0,0,w,h);
+      offCtx.drawImage(ctx.canvas,x,y,w,h,0,0,w,h);
+      ctx.save(); ctx.filter='blur(12px)'; ctx.drawImage(off,x,y,w,h,h); ctx.restore();
     }
   }
 
-  async function getCamera() {
-    const [iw, ih] = els.res.value.split('x').map(Number);
-    const fps = Number(els.fps.value);
-    const tries = [
-      { video: { width: {ideal: iw}, height: {ideal: ih}, frameRate: {ideal: fps}, facingMode: 'environment' }, audio:false },
-      { video: { width: iw, height: ih, facingMode: 'environment' }, audio:false },
-      { video: true, audio:false }
+  async function getCamera(){
+    const [iw,ih]=els.res.value.split('x').map(Number);
+    const fps=Number(els.fps.value)||30;
+    const tries=[
+      {video:{width:{ideal:iw},height:{ideal:ih},frameRate:{ideal:fps},facingMode:'environment'},audio:false},
+      {video:{width:iw,height:ih,facingMode:'environment'},audio:false},
+      {video:true,audio:false}
     ];
-    for (const c of tries) {
+    for (const c of tries){
       try { return await navigator.mediaDevices.getUserMedia(c); }
-      catch (e) { console.warn('getUserMedia failed with', c, e); }
+      catch (e){ console.warn('getUserMedia failed with', c, e); }
     }
-    throw new Error('Camera access failed. Check permissions in browser settings.');
+    throw new Error('Camera access failed. Check browser permissions.');
   }
 
-  async function startPreview() {
+  async function startPreview(){
     stream = await getCamera();
-    els.raw.srcObject = stream;
-    try {
-      await els.raw.play();
-    } catch (e) {
-      // Some browsers need a user gesture; Start button click counts, but just in case:
-      log('Tap the screen to allow video playback.');
-      console.error(e);
+    els.raw.srcObject=stream;
+    await els.raw.play().catch(()=>{});
+    if (!els.raw.videoWidth || !els.raw.videoHeight){
+      await new Promise(r=>els.raw.onloadedmetadata=r);
     }
-    // Size canvases after video metadata is ready
-    if (!els.raw.videoWidth || !els.raw.videoHeight) {
-      await new Promise(r => els.raw.onloadedmetadata = r);
-    }
-    els.out.width = els.raw.videoWidth;
-    els.out.height = els.raw.videoHeight;
-    els.overlay.width = els.out.width;
-    els.overlay.height = els.out.height;
-    log('Camera ready.');
+    els.out.width=els.raw.videoWidth; els.out.height=els.raw.videoHeight;
+    els.overlay.width=els.out.width; els.overlay.height=els.out.height;
+    say('Camera ready.');
   }
 
-  function save() {
+  function save(){
     const type = rec?.mimeType || 'video/webm';
-    const blob = new Blob(chunks, { type });
+    const blob = new Blob(chunks,{type});
     const url = URL.createObjectURL(blob);
-    const ext = type.includes('mp4') ? 'mp4' : 'webm';
-    const a = document.createElement('a');
-    a.href = url; a.download = `anonymised_${Date.now()}.${ext}`;
+    const ext = type.includes('mp4')?'mp4':'webm';
+    const a=document.createElement('a'); a.href=url; a.download=`anonymised_${Date.now()}.${ext}`;
     document.body.appendChild(a); a.click(); a.remove();
-    setTimeout(()=>URL.revokeObjectURL(url), 500);
+    setTimeout(()=>URL.revokeObjectURL(url),500);
   }
 
-  function stopAll() {
-    if (raf) cancelAnimationFrame(raf), raf = null;
-    if (stopId) clearTimeout(stopId), stopId = null;
-    if (rec && rec.state !== 'inactive') rec.stop();
-    els.start.disabled = false; els.stop.disabled = true;
-    log('Stopped.');
+  function stopAll(){
+    if (raf) cancelAnimationFrame(raf), raf=null;
+    if (stopId) clearTimeout(stopId), stopId=null;
+    if (rec && rec.state!=='inactive') rec.stop();
+    els.start.disabled=false; els.stop.disabled=true;
+    say('Stopped.');
   }
 
-  async function loop(ctx,w,h) {
-    raf = requestAnimationFrame(()=>loop(ctx,w,h));
+  async function loop(ctx,w,h){
+    raf=requestAnimationFrame(()=>loop(ctx,w,h));
     ctx.drawImage(els.raw,0,0,w,h);
-    let faces = [];
-    try {
-      faces = await model.estimateFaces({ input: els.raw });
-    } catch (e) {
-      // If GPU hiccups, keep preview going
-      console.warn('estimateFaces error', e);
+    if (model){
+      try {
+        const faces = await model.estimateFaces({input:els.raw});
+        if (faces.length){
+          const k=faces[0].keypoints, m=els.mode.value;
+          drawMask(ctx,m,LEFT.map(i=>k[i]));
+          drawMask(ctx,m,RIGHT.map(i=>k[i]));
+        }
+      } catch (e) { console.warn('estimateFaces error', e); }
     }
-    if (faces.length) {
-      const k = faces[0].keypoints;
-      const m = els.mode.value;
-      drawMask(ctx, m, LEFT.map(i=>k[i]));
-      drawMask(ctx, m, RIGHT.map(i=>k[i]));
-    }
-    const s = Math.floor((performance.now()-startTime)/1000);
-    els.timer.textContent = `${String(Math.floor(s/60)).padStart(2,'0')}:${String(s%60).padStart(2,'0')}`;
+    const s=Math.floor((performance.now()-startTime)/1000);
+    els.timer.textContent=`${String(Math.floor(s/60)).padStart(2,'0')}:${String(s%60).padStart(2,'0')}`;
   }
 
   els.start.onclick = async () => {
-    els.start.disabled = true; els.stop.disabled = false;
-    try {
-      await startPreview();
-    } catch (e) {
-      log(e.message || 'Could not start camera.');
-      console.error(e);
-      els.start.disabled = false; els.stop.disabled = true;
-      return;
-    }
-    const ctx = els.out.getContext('2d');
-    const w = els.out.width, h = els.out.height;
-    startTime = performance.now();
+    els.start.disabled=true; els.stop.disabled=false;
+    try { await startPreview(); }
+    catch (e){ say(e.message||'Could not start camera.'); console.error(e); els.start.disabled=false; els.stop.disabled=true; return; }
 
-    // Try to start recording; if not supported, keep preview & mask anyway
-    const streamOut = els.out.captureStream(Number(els.fps.value) || 30);
-    const mimes = ['video/webm;codecs=vp9','video/webm;codecs=vp8','video/webm','video/mp4'];
-    const mime = mimes.find(m => window.MediaRecorder && MediaRecorder.isTypeSupported(m));
-    if (!window.MediaRecorder || !mime) {
-      log('Preview running (MediaRecorder not supported for this browser). You can still test the anonymisation.');
+    const ctx=els.out.getContext('2d');
+    const w=els.out.width,h=els.out.height;
+    startTime=performance.now();
+
+    const outStream = els.out.captureStream(Number(els.fps.value)||30);
+    const mimes=['video/webm;codecs=vp9','video/webm;codecs=vp8','video/webm','video/mp4'];
+    const mime = (window.MediaRecorder && mimes.find(m=>MediaRecorder.isTypeSupported(m))) || null;
+    if (!mime){
+      say('Preview running (recording not supported).');
       loop(ctx,w,h);
+      stopId=setTimeout(stopAll, Math.max(10, Number(els.dur.value)||120)*1000);
       return;
     }
 
     try {
-      rec = new MediaRecorder(streamOut, { mimeType: mime, videoBitsPerSecond: 4_000_000 });
+      rec = new MediaRecorder(outStream, { mimeType: mime, videoBitsPerSecond: 4_000_000 });
     } catch (e) {
-      log('Could not start recorder. Preview only.');
-      console.error(e);
+      console.warn('MediaRecorder init failed', e);
+      say('Preview running (recorder init failed).');
       loop(ctx,w,h);
+      stopId=setTimeout(stopAll, Math.max(10, Number(els.dur.value)||120)*1000);
       return;
     }
 
-    chunks = [];
-    rec.ondataavailable = e => e.data && e.data.size && chunks.push(e.data);
-    rec.onstop = save;
+    chunks=[]; rec.ondataavailable=e=>e.data?.size&&chunks.push(e.data); rec.onstop=save;
     rec.start(1000);
-    log(`Recording… (${mime})`);
+    say(`Recording… (${mime})`);
     loop(ctx,w,h);
-
-    const durMs = Math.max(10, Number(els.dur.value) || 120) * 1000;
-    stopId = setTimeout(stopAll, durMs);
+    stopId=setTimeout(stopAll, Math.max(10, Number(els.dur.value)||120)*1000);
   };
 
   els.stop.onclick = stopAll;
 })();
 </script>
+</body>
+</html>
